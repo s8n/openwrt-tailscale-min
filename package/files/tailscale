@@ -1,0 +1,68 @@
+#!/bin/sh
+# Wrapper for the tailscale CLI. The CLI is too big to keep on flash next to
+# the daemon, so it is downloaded to RAM on first use and run from there.
+
+CLI_VERSION='@TS_VERSION@'
+DEFAULT_URL='@CLI_URL@'
+DEFAULT_SHA256='@CLI_SHA256@'
+CLI_SIZE='@CLI_SIZE@'
+
+. /lib/functions.sh
+
+config_load tailscale
+config_get cli settings cli_path /tmp/tailscale-cli
+config_get url settings cli_url "$DEFAULT_URL"
+config_get sha256 settings cli_sha256 "$DEFAULT_SHA256"
+[ "$sha256" = none ] && sha256=
+
+die() {
+	echo "tailscale: $*" >&2
+	exit 1
+}
+
+have_cli() {
+	[ -x "$cli" ] || return 1
+	# The stamp records which checksum the cached file was verified against,
+	# so a package upgrade or config change triggers a fresh download.
+	[ -z "$sha256" ] || [ "$(cat "$cli.sha256" 2>/dev/null)" = "$sha256" ]
+}
+
+download_cli() {
+	[ -n "$url" ] || die "no CLI download URL; set one with: uci set tailscale.settings.cli_url=<url> && uci commit tailscale"
+
+	mkdir -p "${cli%/*}"
+	rm -f "$cli" "$cli.sha256" "$cli.part"
+
+	local avail need
+	avail=$(df -k "${cli%/*}" | awk 'NR == 2 { print $4 }')
+	need=$((CLI_SIZE / 1024 + 4096))
+	[ -z "$avail" ] || [ "$avail" -ge "$need" ] ||
+		die "not enough free space in ${cli%/*} (${avail} KiB free, need ~${need} KiB)"
+
+	echo "tailscale: downloading CLI $CLI_VERSION from $url" >&2
+	wget -q -O "$cli.part" "$url" || { rm -f "$cli.part"; die "download failed"; }
+
+	if [ -n "$sha256" ]; then
+		local actual
+		actual=$(sha256sum "$cli.part" | cut -d' ' -f1)
+		if [ "$actual" != "$sha256" ]; then
+			rm -f "$cli.part"
+			die "checksum mismatch (got $actual, expected $sha256)"
+		fi
+	fi
+
+	chmod 755 "$cli.part"
+	mv -f "$cli.part" "$cli"
+	echo "$sha256" > "$cli.sha256"
+}
+
+have_cli || download_cli
+
+# Catch (not ignore) SIGINT so the CLI still gets a default handler but the
+# reminder below is printed after Ctrl-C too.
+trap : INT
+"$cli" "$@"
+rc=$?
+
+echo "tailscale: the CLI is kept in RAM at $cli; remove it when you're done: rm $cli" >&2
+exit $rc

@@ -1,0 +1,50 @@
+#!/bin/sh
+# Puts tailscale0 in its own firewall zone on first install. fw4 rejects
+# input and forwarding on interfaces that aren't in any zone, which would
+# block reaching the router over tailscale and using it as an exit node or
+# subnet router. Removed again by the package's pre-deinstall script.
+
+[ "$PKG_UPGRADE" = 1 ] && exit 0
+
+# Leave an existing setup alone, e.g. tailscale0 already added to lan.
+uci -q show firewall | grep -q "tailscale0" && exit 0
+uci -q get firewall.tailscale >/dev/null && exit 0
+
+zone_exists() {
+	uci -q show firewall | grep -q "^firewall\.@\?[^.]*\.name='$1'$"
+}
+
+uci -q batch <<EOI
+set firewall.tailscale=zone
+set firewall.tailscale.name='tailscale'
+add_list firewall.tailscale.device='tailscale0'
+set firewall.tailscale.input='ACCEPT'
+set firewall.tailscale.output='ACCEPT'
+set firewall.tailscale.forward='ACCEPT'
+set firewall.tailscale.masq='1'
+set firewall.tailscale.mtu_fix='1'
+EOI
+
+if zone_exists wan; then
+	uci -q batch <<EOI
+set firewall.tailscale_wan=forwarding
+set firewall.tailscale_wan.src='tailscale'
+set firewall.tailscale_wan.dest='wan'
+EOI
+fi
+
+if zone_exists lan; then
+	uci -q batch <<EOI
+set firewall.tailscale_lan=forwarding
+set firewall.tailscale_lan.src='tailscale'
+set firewall.tailscale_lan.dest='lan'
+set firewall.lan_tailscale=forwarding
+set firewall.lan_tailscale.src='lan'
+set firewall.lan_tailscale.dest='tailscale'
+EOI
+fi
+
+uci commit firewall
+[ -z "$IPKG_INSTROOT" ] && /etc/init.d/firewall reload >/dev/null 2>&1
+
+exit 0

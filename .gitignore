@@ -1,0 +1,3 @@
+dist/
+keys/*.pem
+!keys/*.pub.pem
